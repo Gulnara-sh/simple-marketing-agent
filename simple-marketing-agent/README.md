@@ -1,124 +1,129 @@
 # Simple Marketing Agent
 
-Маленький аналитический пайплайн с AI-агентом: 3 CSV-файла → SQL-чистка → база SQLite → MCP-сервер, через который Claude отвечает на вопросы про расходы, выручку и ROAS.
+A small analytics pipeline with an AI agent on top: three raw CSV exports are cleaned with SQL into a SQLite database, and an **MCP server** lets Claude answer questions about spend, revenue, ROAS and CPA, reliably and without being able to change the data.
 
 ```
 data/*.csv  ──►  build.py + transform.sql  ──►  marketing.db  ──►  server.py (MCP)  ──►  Claude
-                 (загрузка, чистка, проверки)                       (3 инструмента)
+                 (load, clean, check)                              (3 tools)
 ```
 
-## Файлы
+## Files
 
-| Файл | Что внутри |
+| File | Contents |
 |---|---|
-| `data/google_ads.csv` | расходы Google Ads по дням, в долларах |
-| `data/meta_ads.csv` | расходы Meta (Facebook/Instagram) по дням, в евро |
-| `data/crm_orders.csv` | заказы из CRM: откуда пришёл клиент (`utm_source`) и сумма |
-| `transform.sql` | вся чистка данных, 3 шага с комментариями |
-| `build.py` | загружает CSV в базу, запускает `transform.sql`, проверяет качество |
-| `server.py` | MCP-сервер для Claude, 3 инструмента |
-| `test.py` | 12 проверок, что агент отвечает правильно и безопасно |
+| `data/google_ads.csv` | Google Ads daily spend and clicks, in USD |
+| `data/meta_ads.csv` | Meta (Facebook / Instagram) daily spend and clicks, in EUR |
+| `data/crm_orders.csv` | CRM orders: traffic source (`utm_source`) and revenue |
+| `transform.sql` | all data cleaning, 3 commented steps |
+| `build.py` | loads the CSVs, runs `transform.sql`, runs data-quality checks |
+| `server.py` | MCP server for Claude, 3 tools |
+| `test.py` | 12 checks that the agent's answers are correct and safe |
 
-## Запуск
+## Quick start
 
-Нужен Python 3.10+.
+Requires Python 3.10+.
 
 ```bash
-cd ~/Projects/simple-marketing-agent
-python3.12 -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
-pip install "mcp==1.27.0"
+pip install -r requirements.txt
 
-python build.py      # собрать базу
-python test.py       # проверить: должно быть "12 of 12 checks passed"
+python build.py      # build the database
+python test.py       # expect "12 of 12 checks passed"
 ```
 
-## Подключить к Claude Desktop
+## Connect to Claude
 
-Узнать пути:
-```bash
-echo "$PWD/.venv/bin/python"
-echo "$PWD/server.py"
-```
-
-Открыть настройки:
-```bash
-open -e ~/Library/Application\ Support/Claude/claude_desktop_config.json
-```
-
-Вставить, подставив свои пути, и перезапустить Claude Desktop (Cmd+Q):
+**Claude Desktop:** add to `~/Library/Application Support/Claude/claude_desktop_config.json` and restart the app:
 ```json
 {
   "mcpServers": {
     "simple-marketing": {
-      "command": "/Users/ВАШЕ_ИМЯ/Projects/simple-marketing-agent/.venv/bin/python",
-      "args": ["/Users/ВАШЕ_ИМЯ/Projects/simple-marketing-agent/server.py"]
+      "command": "/ABSOLUTE/PATH/simple-marketing-agent/.venv/bin/python",
+      "args": ["/ABSOLUTE/PATH/simple-marketing-agent/server.py"]
     }
   }
 }
 ```
 
-Спросить в Claude:
+**Claude Code:**
+```bash
+claude mcp add simple-marketing -- /ABSOLUTE/PATH/.venv/bin/python /ABSOLUTE/PATH/server.py
+```
+
+Try asking:
 - *What was ROAS by channel in September?*
 - *Which channel has the lowest CPA?*
 - *Are there any data problems?*
-- *What was our TikTok ROAS?* (данных нет — Claude должен так и сказать)
+- *What was our TikTok ROAS?* (there is no TikTok data; Claude should say so)
 
 ---
 
-## Как это работает
+## How it works
 
-### Шаг 1. Данные с проблемами
+### 1. Raw data with real-world problems
 
-В данные специально заложены 5 проблем, которые встречаются в реальной работе:
+Five problems that come up constantly with marketing data are built into the sample:
 
-| Проблема | Где | Как решено в `transform.sql` |
+| Problem | Where | Fix in `transform.sql` |
 |---|---|---|
-| **A.** Meta прислала одни и те же строки дважды | `meta_ads.csv`, 28–30 сентября | `SELECT DISTINCT` |
-| **B.** Расходы Meta в евро, Google в долларах | `meta_ads.csv` | умножаем на курс 1.10 |
-| **C.** `utm_source` набран вручную: `Google`, `google `, `fb`, `adwords` | `crm_orders.csv` | `LOWER(TRIM(...))` + `CASE` |
-| **D.** Один заказ записан дважды | `crm_orders.csv` | `GROUP BY order_id` |
-| **E.** Google не прислал данные за 14 сентября | `google_ads.csv` | исправить нельзя: проверка находит пропуск, агент предупреждает |
+| **A.** Meta re-sends the same rows | `meta_ads.csv`, Sep 28–30 | `SELECT DISTINCT` |
+| **B.** Meta spend is in EUR, Google in USD | `meta_ads.csv` | convert at 1.10 |
+| **C.** `utm_source` is typed by hand: `Google`, `google `, `fb`, `adwords` | `crm_orders.csv` | `LOWER(TRIM(...))` + `CASE` mapping |
+| **D.** The CRM records some orders twice | `crm_orders.csv` | `GROUP BY order_id` |
+| **E.** Google sent no data for Sep 14 | `google_ads.csv` | can't be fixed: a check detects it and the agent warns about it |
 
-### Шаг 2. Чистка (`transform.sql`)
+### 2. Transformation (`transform.sql`)
 
-Три таблицы на выходе:
-1. **`clean_ad_spend`** — расходы обеих платформ в одной таблице, в долларах, без дублей.
-2. **`clean_orders`** — заказы без дублей, с понятным каналом (`google_ads`, `meta_ads`, `email`, `direct`).
-3. **`daily_channel`** — итоговая таблица: день × канал → расходы, клики, заказы, выручка. Её и читает агент.
+1. **`clean_ad_spend`**: spend from both platforms in one table, in USD, no duplicates.
+2. **`clean_orders`**: deduplicated orders with a clean channel (`google_ads`, `meta_ads`, `email`, `direct`).
+3. **`daily_channel`**: the final table, one row per day × channel with spend, clicks, orders and revenue. This is what the agent reads.
 
-### Шаг 3. Проверки качества (`build.py`)
+### 3. Data-quality checks (`build.py`)
 
-Четыре проверки. Каждая — SQL-запрос, который ищет **плохие** строки. Пустой результат значит `OK`, иначе `WARN`.
-Ожидаемый результат: 3 × OK и 1 × WARN (пропуск 14 сентября).
+Each check is a SQL query that returns the **bad** rows: empty result means `OK`, otherwise `WARN`.
+Expected output: 3 × OK and 1 × WARN (the Sep 14 gap).
 
-### Шаг 4. MCP-сервер (`server.py`)
+### 4. MCP server (`server.py`)
 
-MCP — открытый протокол, по которому AI-ассистент (Claude) вызывает ваши функции. Каждая функция с `@mcp.tool()` становится инструментом, который Claude видит вместе с описанием.
-
-| Инструмент | Что делает |
+| Tool | What it does |
 |---|---|
-| `get_channel_metrics` | расходы, заказы, выручка, ROAS, CPA по каналам за период + предупреждения |
-| `check_data_quality` | список известных проблем в данных |
-| `run_sql` | любой `SELECT`, если первые два не подходят |
+| `get_channel_metrics` | spend, clicks, orders, revenue, ROAS, CPA per channel for a period, plus warnings |
+| `check_data_quality` | known data problems |
+| `run_sql` | any `SELECT` for questions the other tools can't answer |
 
-**Почему ответам агента можно доверять:**
-1. **ROAS считает сервер, а не Claude.** Формула одна, в коде, поэтому ответы не «плавают».
-2. **Предупреждения в каждом ответе.** Если в периоде есть пропуск данных, об этом говорится в ответе. И только в релевантном: вопрос про Meta не тянет предупреждение про Google.
-3. **Честность.** На вопрос про несуществующий канал приходит ошибка со списком доступных каналов, а не выдуманная цифра.
-4. **Только чтение.** База открыта в режиме `mode=ro`, поэтому даже если агент попробует `DELETE`, SQLite откажет.
+**What makes the agent reliable:**
+1. **The server calculates metrics, not the model.** ROAS and CPA are defined once in SQL, so answers are consistent and testable. ROAS is `SUM(revenue) / SUM(spend)`, not an average of daily ratios.
+2. **Answers carry their own warnings.** If the requested period contains a data gap, the response says so, and only when it's relevant (a question about Meta doesn't get a warning about Google).
+3. **No made-up numbers.** Asking about a channel that doesn't exist returns an error listing the available channels.
+4. **Read-only.** The database is opened with `mode=ro`, so SQLite itself rejects `INSERT`, `UPDATE`, `DELETE` and `DROP`, even if the agent tries.
 
-### Шаг 5. Тесты (`test.py`)
+### 5. Tests (`test.py`)
 
-12 проверок в 4 группах:
-1. Цифры агента совпадают с расчётом напрямую из CSV обычным Python, без SQL.
-2. Предупреждение о 14 сентября есть, а ложных предупреждений нет.
-3. На вопрос про TikTok — ошибка, а не цифра.
-4. `DELETE` и `DROP` не проходят, данные на месте.
+12 checks in 4 groups:
+1. **Correct numbers**: the agent's figures match an independent calculation from the raw CSVs in plain Python (no shared SQL).
+2. **Warnings**: the Sep 14 gap is reported; clean periods and unrelated channels get no false warnings.
+3. **Honesty**: a question about TikTok returns an error, not a number.
+4. **Safety**: `DELETE` and `DROP` are blocked and the data is intact afterwards.
 
-## Упрощения (стоит назвать самой на собеседовании)
+## What the data shows (September 2026, last-click)
 
-- Курс EUR→USD фиксированный; в жизни берётся курс на каждый день.
-- Атрибуция last-click по `utm_source`; в жизни сравнивают несколько моделей.
-- Данные синтетические.
-- SQLite вместо ClickHouse / BigQuery; SQL переносится почти без изменений.
+| Channel | Spend | Orders | Revenue | ROAS | CPA |
+|---|---:|---:|---:|---:|---:|
+| Google Ads | $21,755 | 464 | $70,992 | 3.26 | $46.89 |
+| Meta Ads | $15,167 | 492 | $60,662 | 4.00 | $30.83 |
+| Email | — | 63 | $6,249 | — | — |
+| Direct | — | 69 | $6,550 | — | — |
+
+Meta looks more efficient, but Google's figures are missing Sep 14 spend, so Google's ROAS is slightly overstated. This is exactly the kind of caveat the agent is built to surface.
+
+## Simplifications and next steps
+
+| Here | In production |
+|---|---|
+| fixed EUR→USD rate | daily FX rates table |
+| last-click attribution by `utm_source` | several models (first-touch, linear, position-based) compared |
+| synthetic data | real connectors |
+| SQLite | ClickHouse / BigQuery / Snowflake; the SQL ports with minor changes |
+| `build.py` run by hand | scheduled job with an alert on failed checks |
+| local MCP server | remote MCP server with authentication |
